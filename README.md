@@ -1,70 +1,74 @@
-# Retouch API — шаг 2
+# Retouch API — шаг 3: GPT Image 2
 
-На этом шаге OpenAI ещё НЕ подключён.
+Этот архив добавляет реальный endpoint:
 
-Добавлен endpoint:
+`POST /api/retouch`
 
-`POST /api/retouch-test`
+Он принимает:
+- `image`
+- `effects`
+- `intensity`
 
-Он принимает multipart/form-data:
+и вызывает GPT Image 2 через официальный OpenAI SDK.
 
-- `image` — изображение
-- `effects` — JSON-массив, например `["wrinkles","eye_bags"]`
-- `intensity` — `"1"`, `"2"` или `"3"`
+## 1. Сначала добавьте API key в Vercel
 
-И возвращает JSON с информацией о полученном файле.
+Project → Settings → Environment Variables
 
-## Как обновить GitHub
+Name:
+`OPENAI_API_KEY`
 
-Можно просто заменить содержимое текущего репозитория файлами из этого архива и сделать commit.
+Value:
+ваш OpenAI API key.
 
-После автоматического redeploy Vercel проверьте:
+Добавьте для Production (можно также Preview).
 
-`https://ВАШ-ПРОЕКТ.vercel.app/api/health`
+После добавления переменной сделайте новый deployment.
 
-Затем:
+Проверка:
 
-`https://ВАШ-ПРОЕКТ.vercel.app/api/retouch-test`
+`https://retouch-api.vercel.app/api/health`
 
-GET для retouch-test не предусмотрен — это нормально. Тестировать нужно POST-запросом.
+Теперь JSON должен содержать:
 
-## Самый простой тест
+`"openaiConfigured": true`
 
-В архиве есть `local-upload-test.html`.
+## 2. Обновите GitHub
 
-1. Откройте его на компьютере.
-2. В поле API URL вставьте:
-   `https://retouch-api.vercel.app/api/retouch-test`
-3. Выберите фото до ~4 MB.
-4. Нажмите «Отправить».
+Замените содержимое репозитория файлами этого архива и сделайте commit.
 
-Успешный ответ будет примерно:
+Vercel автоматически установит dependency `openai` и redeploy проекта.
 
-```json
-{
-  "status": 200,
-  "ok": true,
-  "received": {
-    "name": "photo.jpg",
-    "type": "image/jpeg",
-    "bytes": 1234567,
-    "effects": ["wrinkles", "eye_bags"],
-    "intensity": "1"
-  }
-}
-```
+## 3. Проверьте реальную генерацию
+
+Откройте `local-openai-test.html`.
+
+API URL уже указан:
+`https://retouch-api.vercel.app/api/retouch`
+
+Выберите:
+- фотографию до 4 MB;
+- один или несколько эффектов;
+- интенсивность.
+
+Нажмите «Обработать».
+
+Если всё работает, справа появится настоящее изображение от GPT Image 2.
+
+## Важно
+
+На этом шаге watermark специально ещё не добавлен.
+
+Цель — сначала изолированно проверить:
+1. Vercel → OpenAI;
+2. качество редактирования;
+3. latency;
+4. наши prompts.
+
+После этого добавим server-side watermark, и только watermarked image будет уходить в браузер до оплаты.
 
 ## CORS
 
-Для этого тестового шага установлен:
+Пока всё ещё `Access-Control-Allow-Origin: *`, чтобы тестировать из локального HTML.
 
-`Access-Control-Allow-Origin: *`
-
-Это сделано намеренно, чтобы endpoint можно было проверить даже из локального HTML.
-
-Перед production мы заменим `*` на конкретный домен лендинга на REG.RU.
-
-## Размер файла
-
-В endpoint добавлен программный лимит 4 MB, чтобы не упираться в лимиты serverless-запроса.
-На следующем этапе мы также добавим client-side уменьшение фотографий перед отправкой.
+Когда основной лендинг будет размещён на REG.RU, заменим `*` на его конкретный origin.
