@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Retouch API upload test</title>
+  <style>
+    body{font-family:Arial,sans-serif;max-width:720px;margin:40px auto;padding:0 16px}
+    button{padding:12px 18px}
+    pre{padding:16px;background:#f4f4f4;border-radius:12px;white-space:pre-wrap}
+  </style>
+</head>
+<body>
+  <h1>Тест загрузки в Vercel</h1>
+  <p>Вставьте URL вашего Vercel-проекта, выберите фото и отправьте.</p>
+
+  <label>
+    API URL:
+    <input id="url" style="width:100%;padding:10px;margin:8px 0 16px"
+      placeholder="https://retouch-api.vercel.app/api/retouch-test">
+  </label>
+
+  <input id="file" type="file" accept="image/*">
+  <button id="send">Отправить</button>
+
+  <pre id="out">Ждём тест...</pre>
+
+  <script>
+    document.getElementById('send').onclick = async () => {
+      const url = document.getElementById('url').value.trim();
+      const file = document.getElementById('file').files[0];
+      const out = document.getElementById('out');
+
+      if (!url || !file) {
+        out.textContent = 'Укажите API URL и выберите фото';
+        return;
+      }
+
+      const form = new FormData();
+      form.append('image', file);
+      form.append('effects', JSON.stringify(['wrinkles', 'eye_bags']));
+      form.append('intensity', '1');
+
+      out.textContent = 'Отправляем...';
+
+      try {
+        const res = await fetch(url, { method: 'POST', body: form });
+        const data = await res.json();
+        out.textContent = JSON.stringify({ status: res.status, ...data }, null, 2);
+      } catch (e) {
+        out.textContent = 'Ошибка: ' + e.message;
+      }
+    };
+  </script>
+</body>
+</html>
