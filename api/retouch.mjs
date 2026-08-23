@@ -1,12 +1,11 @@
 import OpenAI, { toFile } from "openai";
-import { corsHeaders, isOriginAllowed, forbiddenOriginResponse } from "../lib/cors.mjs";
 import { MAX_FILE_BYTES, SUPPORTED_EFFECTS } from "../lib/config.mjs";
 import { buildPrompt } from "../lib/prompt.mjs";
 import { applyPreviewWatermark } from "../lib/watermark.mjs";
 
 export const maxDuration = 120;
 
-function sanitizeApiKey(raw) {
+function sanitizeSecret(raw) {
   return String(raw || "")
     .split(/\r?\n/)[0]
     .trim();
@@ -16,37 +15,55 @@ function parseEffects(raw) {
   try {
     const parsed = JSON.parse(String(raw || "[]"));
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((x) => SUPPORTED_EFFECTS.includes(String(x)));
+    return parsed.filter((x) => SUPPORTED_EFFECTS.includes(String(x))).slice(0, 4);
   } catch {
     return [];
   }
 }
 
-export function OPTIONS(request) {
-  const origin = request.headers.get("origin") || "";
-  if (!isOriginAllowed(origin)) {
-    return forbiddenOriginResponse(origin);
-  }
-
-  return new Response(null, {
-    status: 204,
-    headers: corsHeaders(origin)
+function json(payload, status = 200) {
+  return Response.json(payload, {
+    status,
+    headers: {
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff"
+    }
   });
 }
 
+function isInternalRequest(request) {
+  const expected = sanitizeSecret(process.env.INTERNAL_API_KEY);
+  const received = String(request.headers.get("x-dream-foto-key") || "").trim();
+  return Boolean(expected && received && expected === received);
+}
+
+function isSafetyError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  const code = String(error?.code || "").toLowerCase();
+
+  return (
+    code.includes("moderation") ||
+    message.includes("moderation_blocked") ||
+    message.includes("safety_violations") ||
+    message.includes("safety system")
+  );
+}
+
 export async function POST(request) {
-  const origin = request.headers.get("origin") || "";
-  if (!isOriginAllowed(origin)) {
-    return forbiddenOriginResponse(origin);
+  if (!isInternalRequest(request)) {
+    return json(
+      { ok: false, error: "forbidden", message: "Forbidden" },
+      403
+    );
   }
 
   try {
-    const apiKey = sanitizeApiKey(process.env.OPENAI_API_KEY);
+    const apiKey = sanitizeSecret(process.env.OPENAI_API_KEY);
 
     if (!apiKey) {
-      return Response.json(
-        { ok: false, error: "openai_key_missing" },
-        { status: 500, headers: corsHeaders(origin) }
+      return json(
+        { ok: false, error: "openai_key_missing", message: "OpenAI key is not configured." },
+        500
       );
     }
 
@@ -56,46 +73,40 @@ export async function POST(request) {
     const intensity = String(formData.get("intensity") || "1");
 
     if (!image || typeof image === "string") {
-      return Response.json(
-        { ok: false, error: "image_required" },
-        { status: 400, headers: corsHeaders(origin) }
-      );
+      return json({ ok: false, error: "image_required", message: "Image is required." }, 400);
     }
 
     if (!image.type?.startsWith("image/")) {
-      return Response.json(
-        { ok: false, error: "invalid_file_type" },
-        { status: 415, headers: corsHeaders(origin) }
-      );
+      return json({ ok: false, error: "invalid_file_type", message: "Invalid file type." }, 415);
     }
 
     if (image.size > MAX_FILE_BYTES) {
-      return Response.json(
+      return json(
         {
           ok: false,
           error: "image_too_large",
+          message: "Image is too large.",
           maxBytes: MAX_FILE_BYTES,
           receivedBytes: image.size
         },
-        { status: 413, headers: corsHeaders(origin) }
+        413
       );
     }
 
     if (!effects.length) {
-      return Response.json(
-        { ok: false, error: "no_effects_selected" },
-        { status: 400, headers: corsHeaders(origin) }
+      return json(
+        { ok: false, error: "no_effects_selected", message: "No supported effects selected." },
+        400
       );
     }
 
     const prompt = buildPrompt(effects, intensity);
-
     const openai = new OpenAI({ apiKey });
 
     const inputBuffer = Buffer.from(await image.arrayBuffer());
     const upload = await toFile(
       inputBuffer,
-      image.name || "photo.jpg",
+      "photo.jpg",
       { type: image.type || "image/jpeg" }
     );
 
@@ -109,17 +120,14 @@ export async function POST(request) {
     });
 
     const item = result.data?.[0];
-
-    if (!item) {
-      throw new Error("OpenAI returned no image");
-    }
+    if (!item) throw new Error("OpenAI returned no image");
 
     let cleanBuffer;
 
     if (item.b64_json) {
       cleanBuffer = Buffer.from(item.b64_json, "base64");
     } else if (item.url) {
-      const imgResponse = await fetch(item.url);
+      const imgResponse = await fetch(item.url, { cache: "no-store" });
       if (!imgResponse.ok) throw new Error("Could not download generated image");
       cleanBuffer = Buffer.from(await imgResponse.arrayBuffer());
     } else {
@@ -127,34 +135,46 @@ export async function POST(request) {
     }
 
     const previewBuffer = await applyPreviewWatermark(cleanBuffer);
+    cleanBuffer = null;
 
     return new Response(previewBuffer, {
       status: 200,
       headers: {
-        ...corsHeaders(origin),
         "Content-Type": "image/jpeg",
         "Content-Disposition": 'inline; filename="preview.jpg"',
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
         "X-Retouch-Generation-Ms": String(Date.now() - started)
       }
     });
+
   } catch (error) {
-    console.error("retouch_error", error);
+    const status = Number.isInteger(error?.status) ? error.status : 500;
 
-    const status =
-      error?.status && Number.isInteger(error.status)
-        ? error.status
-        : 500;
+    console.error("retouch_error", {
+      status,
+      code: error?.code || null,
+      type: error?.type || null
+    });
 
-    return Response.json(
+    if (isSafetyError(error)) {
+      return json(
+        {
+          ok: false,
+          error: "image_safety_rejected",
+          message: "The image was rejected by the image safety system."
+        },
+        422
+      );
+    }
+
+    return json(
       {
         ok: false,
         error: "retouch_failed",
-        message: error instanceof Error ? error.message : "Unknown error"
+        message: "Image processing failed."
       },
-      {
-        status,
-        headers: corsHeaders(origin)
-      }
+      status >= 400 && status <= 599 ? status : 500
     );
   }
 }

@@ -1,35 +1,17 @@
-import { corsHeaders, isOriginAllowed, forbiddenOriginResponse } from "../lib/cors.mjs";
-import { getAllowedOrigins, getWatermarkText } from "../lib/config.mjs";
-
-export function OPTIONS(request) {
-  const origin = request.headers.get("origin") || "";
-  if (!isOriginAllowed(origin)) {
-    return forbiddenOriginResponse(origin);
-  }
-
-  return new Response(null, {
-    status: 204,
-    headers: corsHeaders(origin)
-  });
-}
-
-export function GET(request) {
-  const origin = request.headers.get("origin") || "";
-  if (!isOriginAllowed(origin)) {
-    return forbiddenOriginResponse(origin);
-  }
-
+export function GET() {
   return Response.json(
     {
       ok: true,
       service: "retouch-api",
       openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
-      allowedOrigins: getAllowedOrigins(),
-      watermarkText: getWatermarkText(),
+      internalApiConfigured: Boolean(process.env.INTERNAL_API_KEY),
+      mode: "server-to-server",
       time: new Date().toISOString()
     },
     {
-      headers: corsHeaders(origin)
+      headers: {
+        "Cache-Control": "no-store"
+      }
     }
   );
 }
