@@ -1,126 +1,96 @@
 import OpenAI, { toFile } from "openai";
+import { corsHeaders, isOriginAllowed, forbiddenOriginResponse } from "../lib/cors.mjs";
+import { MAX_FILE_BYTES, SUPPORTED_EFFECTS } from "../lib/config.mjs";
+import { buildPrompt } from "../lib/prompt.mjs";
+import { applyPreviewWatermark } from "../lib/watermark.mjs";
 
 export const maxDuration = 120;
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-  "Cache-Control": "no-store"
-};
-
-const MAX_FILE_BYTES = 4_000_000;
-
-const effectText = {
-  double_chin: "subtly reduce the appearance of the double chin and make the jawline slightly cleaner",
-  cheeks: "subtly make the cheeks and face contour appear a little slimmer",
-  eye_bags: "gently reduce under-eye bags and dark tired-looking areas while keeping natural skin texture",
-  wrinkles: "gently soften visible wrinkles while preserving realistic skin texture and age-appropriate detail",
-  waist: "subtly make the waist appear slimmer while preserving realistic body proportions",
-  belly: "subtly make the abdomen appear flatter while preserving realistic body proportions",
-  sides: "subtly smooth the side waist silhouette while preserving realistic anatomy",
-  posture: "slightly improve posture in a natural way without changing body identity",
-  acne: "remove visible acne and temporary blemishes while preserving pores and natural skin texture",
-  skin: "gently even the skin tone while preserving pores, freckles, moles, and natural facial identity",
-  teeth: "gently whiten the teeth to a natural shade without changing their shape",
-  eyes: "make the eye area look slightly fresher and brighter without changing eye shape or identity"
-};
-
-const intensityText = {
-  "1": "The edit must be very subtle and natural.",
-  "2": "The edit may be noticeable but must remain realistic and natural.",
-  "3": "Make the requested changes stronger, but keep realistic anatomy and preserve the person's identity."
-};
-
-function buildPrompt(effects, intensity) {
-  const requested = effects
-    .map((effect) => effectText[effect])
-    .filter(Boolean);
-
-  if (!requested.length) {
-    throw new Error("No supported effects selected");
-  }
-
-  return `
-Edit the supplied photograph. This is a realistic beauty-retouching task.
-
-ABSOLUTE REQUIREMENTS:
-- Preserve the identity of the person exactly.
-- Keep the same person, facial identity, hairstyle, clothing, pose, camera angle, lighting, background, and composition.
-- Modify ONLY the explicitly requested areas.
-- Do not beautify or alter unrelated features.
-- Do not add makeup unless explicitly requested.
-- Do not change age, ethnicity, facial structure, body shape outside the requested areas, clothing, hands, or background.
-- Avoid plastic skin, warped anatomy, distorted clothing, or bent background lines.
-- The result must look like careful professional photo retouching, not a newly generated person.
-
-REQUESTED EDITS:
-${requested.map((x, i) => `${i + 1}. ${x}`).join("\n")}
-
-INTENSITY:
-${intensityText[intensity] || intensityText["1"]}
-
-Return a photorealistic edited version of the same photograph.
-`.trim();
+function sanitizeApiKey(raw) {
+  return String(raw || "")
+    .split(/\r?\n/)[0]
+    .trim();
 }
 
-export function OPTIONS() {
-  return new Response(null, { status: 204, headers: corsHeaders });
+function parseEffects(raw) {
+  try {
+    const parsed = JSON.parse(String(raw || "[]"));
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x) => SUPPORTED_EFFECTS.includes(String(x)));
+  } catch {
+    return [];
+  }
+}
+
+export function OPTIONS(request) {
+  const origin = request.headers.get("origin") || "";
+  if (!isOriginAllowed(origin)) {
+    return forbiddenOriginResponse(origin);
+  }
+
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders(origin)
+  });
 }
 
 export async function POST(request) {
+  const origin = request.headers.get("origin") || "";
+  if (!isOriginAllowed(origin)) {
+    return forbiddenOriginResponse(origin);
+  }
+
   try {
-    if (!process.env.OPENAI_API_KEY) {
+    const apiKey = sanitizeApiKey(process.env.OPENAI_API_KEY);
+
+    if (!apiKey) {
       return Response.json(
-        { ok:false, error:"openai_key_missing" },
-        { status:500, headers:corsHeaders }
+        { ok: false, error: "openai_key_missing" },
+        { status: 500, headers: corsHeaders(origin) }
       );
     }
 
     const formData = await request.formData();
     const image = formData.get("image");
-    const effectsRaw = formData.get("effects") || "[]";
+    const effects = parseEffects(formData.get("effects"));
     const intensity = String(formData.get("intensity") || "1");
 
     if (!image || typeof image === "string") {
       return Response.json(
-        { ok:false, error:"image_required" },
-        { status:400, headers:corsHeaders }
+        { ok: false, error: "image_required" },
+        { status: 400, headers: corsHeaders(origin) }
       );
     }
 
     if (!image.type?.startsWith("image/")) {
       return Response.json(
-        { ok:false, error:"invalid_file_type" },
-        { status:415, headers:corsHeaders }
+        { ok: false, error: "invalid_file_type" },
+        { status: 415, headers: corsHeaders(origin) }
       );
     }
 
     if (image.size > MAX_FILE_BYTES) {
       return Response.json(
         {
-          ok:false,
-          error:"image_too_large",
-          maxBytes:MAX_FILE_BYTES,
-          receivedBytes:image.size
+          ok: false,
+          error: "image_too_large",
+          maxBytes: MAX_FILE_BYTES,
+          receivedBytes: image.size
         },
-        { status:413, headers:corsHeaders }
+        { status: 413, headers: corsHeaders(origin) }
       );
     }
 
-    let effects = [];
-    try {
-      effects = JSON.parse(String(effectsRaw));
-      if (!Array.isArray(effects)) effects = [];
-    } catch {
-      effects = [];
+    if (!effects.length) {
+      return Response.json(
+        { ok: false, error: "no_effects_selected" },
+        { status: 400, headers: corsHeaders(origin) }
+      );
     }
 
     const prompt = buildPrompt(effects, intensity);
 
-    const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY
-    });
+    const openai = new OpenAI({ apiKey });
 
     const inputBuffer = Buffer.from(await image.arrayBuffer());
     const upload = await toFile(
@@ -144,27 +114,29 @@ export async function POST(request) {
       throw new Error("OpenAI returned no image");
     }
 
-    let resultBuffer;
+    let cleanBuffer;
 
     if (item.b64_json) {
-      resultBuffer = Buffer.from(item.b64_json, "base64");
+      cleanBuffer = Buffer.from(item.b64_json, "base64");
     } else if (item.url) {
       const imgResponse = await fetch(item.url);
       if (!imgResponse.ok) throw new Error("Could not download generated image");
-      resultBuffer = Buffer.from(await imgResponse.arrayBuffer());
+      cleanBuffer = Buffer.from(await imgResponse.arrayBuffer());
     } else {
       throw new Error("OpenAI response contains neither b64_json nor url");
     }
 
-    return new Response(resultBuffer, {
+    const previewBuffer = await applyPreviewWatermark(cleanBuffer);
+
+    return new Response(previewBuffer, {
       status: 200,
       headers: {
-        ...corsHeaders,
-        "Content-Type": "image/png",
+        ...corsHeaders(origin),
+        "Content-Type": "image/jpeg",
+        "Content-Disposition": 'inline; filename="preview.jpg"',
         "X-Retouch-Generation-Ms": String(Date.now() - started)
       }
     });
-
   } catch (error) {
     console.error("retouch_error", error);
 
@@ -175,13 +147,13 @@ export async function POST(request) {
 
     return Response.json(
       {
-        ok:false,
-        error:"retouch_failed",
-        message:error instanceof Error ? error.message : "Unknown error"
+        ok: false,
+        error: "retouch_failed",
+        message: error instanceof Error ? error.message : "Unknown error"
       },
       {
         status,
-        headers:corsHeaders
+        headers: corsHeaders(origin)
       }
     );
   }
